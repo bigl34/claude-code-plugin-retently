@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.log
+.env
+.env.*
+config.json
+*.secret
+*.key
+*.pem
+data/
