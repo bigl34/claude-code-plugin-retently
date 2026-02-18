@@ -89,27 +89,27 @@ node scripts/dist/cli.js list-customers
 ## Usage Examples
 
 ```bash
-node scripts/dist/cli.js get-nps-score
+node /Users/USER/node scripts/dist/cli.js get-nps-score
 ```
 
 ```bash
-node scripts/dist/cli.js list-feedback --limit 10 --sort desc
+node /Users/USER/node scripts/dist/cli.js list-feedback --limit 10 --sort desc
 ```
 
 ```bash
-node scripts/dist/cli.js list-feedback --since 2024-01-15 --limit 50
+node /Users/USER/node scripts/dist/cli.js list-feedback --since 2024-01-15 --limit 50
 ```
 
 ```bash
-node scripts/dist/cli.js list-customers --email john@example.com
+node /Users/USER/node scripts/dist/cli.js list-customers --email john@example.com
 ```
 
 ```bash
-node scripts/dist/cli.js create-customers --data '[{"email":"test@example.com","first_name":"Test"}]'
+node /Users/USER/node scripts/dist/cli.js create-customers --data '[{"email":"test@example.com","first_name":"Test"}]'
 ```
 
 ```bash
-node scripts/dist/cli.js send-survey --email customer@example.com --campaign-id abc123 --delay-days 1
+node /Users/USER/node scripts/dist/cli.js send-survey --email customer@example.com --campaign-id abc123 --delay-days 1
 ```
 
 ## How It Works

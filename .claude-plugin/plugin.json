@@ -1,5 +1,5 @@
 {
   "name": "retently-feedback-manager",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Dedicated agent for Retently NPS/CSAT feedback operations with isolated API access"
 }
