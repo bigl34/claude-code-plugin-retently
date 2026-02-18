@@ -26,7 +26,7 @@ Write operations will return `"write_operation": true` in the response to confir
 
 ## Available CLI Commands
 
-**CLI Path**: `node /home/USER/.claude/plugins/local-marketplace/retently-feedback-manager/scripts/dist/cli.js`
+**CLI Path**: `node /Users/USER/.claude/plugins/local-marketplace/retently-feedback-manager/scripts/dist/cli.js`
 
 ### Read Operations (Always Allowed)
 
@@ -65,32 +65,32 @@ Write operations will return `"write_operation": true` in the response to confir
 
 ### Check NPS Score
 ```bash
-node /home/USER/.claude/plugins/local-marketplace/retently-feedback-manager/scripts/dist/cli.js get-nps-score
+node /Users/USER/.claude/plugins/local-marketplace/retently-feedback-manager/scripts/dist/cli.js get-nps-score
 ```
 
 ### List Recent Feedback
 ```bash
-node /home/USER/.claude/plugins/local-marketplace/retently-feedback-manager/scripts/dist/cli.js list-feedback --limit 10 --sort desc
+node /Users/USER/.claude/plugins/local-marketplace/retently-feedback-manager/scripts/dist/cli.js list-feedback --limit 10 --sort desc
 ```
 
 ### List Feedback Since Date (Polling)
 ```bash
-node /home/USER/.claude/plugins/local-marketplace/retently-feedback-manager/scripts/dist/cli.js list-feedback --since 2024-01-15 --limit 50
+node /Users/USER/.claude/plugins/local-marketplace/retently-feedback-manager/scripts/dist/cli.js list-feedback --since 2024-01-15 --limit 50
 ```
 
 ### Search Customer by Email
 ```bash
-node /home/USER/.claude/plugins/local-marketplace/retently-feedback-manager/scripts/dist/cli.js list-customers --email john@example.com
+node /Users/USER/.claude/plugins/local-marketplace/retently-feedback-manager/scripts/dist/cli.js list-customers --email john@example.com
 ```
 
 ### Create Customers (WRITE - requires explicit user request)
 ```bash
-node /home/USER/.claude/plugins/local-marketplace/retently-feedback-manager/scripts/dist/cli.js create-customers --data '[{"email":"test@example.com","first_name":"Test"}]'
+node /Users/USER/.claude/plugins/local-marketplace/retently-feedback-manager/scripts/dist/cli.js create-customers --data '[{"email":"test@example.com","first_name":"Test"}]'
 ```
 
 ### Send Survey (WRITE - requires explicit user request)
 ```bash
-node /home/USER/.claude/plugins/local-marketplace/retently-feedback-manager/scripts/dist/cli.js send-survey --email customer@example.com --campaign-id abc123 --delay-days 1
+node /Users/USER/.claude/plugins/local-marketplace/retently-feedback-manager/scripts/dist/cli.js send-survey --email customer@example.com --campaign-id abc123 --delay-days 1
 ```
 
 ## Common Tasks
@@ -172,6 +172,6 @@ All commands return JSON. Structure varies by command:
 - Integrate with other platforms (use dedicated agents)
 
 ## Self-Documentation
-Log API quirks/errors to: `/home/USER/biz/plugin-learnings/retently-feedback-manager.md`
+Log API quirks/errors to: `/Users/USER/biz/plugin-learnings/retently-feedback-manager.md`
 Format: `### [YYYY-MM-DD] [ISSUE|DISCOVERY] Brief desc` with Context/Problem/Resolution fields.
 Full workflow: `~/biz/docs/reference/agent-shared-context.md`
