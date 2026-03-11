@@ -37,7 +37,7 @@ Dedicated agent for Retently NPS/CSAT feedback operations with isolated API acce
 ## Quick Start
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USER/claude-code-plugin-retently.git
+git clone https://github.com/bigl34/claude-code-plugin-retently.git
 cd claude-code-plugin-retently
 cp config.template.json config.json  # fill in your credentials
 cd scripts && npm install
