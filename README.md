@@ -3,7 +3,7 @@
 
 Dedicated agent for Retently NPS/CSAT feedback operations with isolated API access
 
-![Version](https://img.shields.io/badge/version-1.0.7-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
+![Version](https://img.shields.io/badge/version-1.2.0-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
 
 ## Features
 
@@ -56,14 +56,6 @@ node scripts/dist/cli.js list-customers
    cd scripts && npm install
    ```
 
-## Configuration
-
-Copy `config.template.json` to `config.json` and fill in the required values:
-
-| Field | Placeholder |
-|-------|-------------|
-| `credentials_path` | `/path/to/your/credentials` |
-
 ## Available Commands
 
 ### Read Operations (Always Allowed)
@@ -97,27 +89,27 @@ Copy `config.template.json` to `config.json` and fill in the required values:
 ## Usage Examples
 
 ```bash
-node /Users/USER/node scripts/dist/cli.js get-nps-score
+node $HOME/node scripts/dist/cli.js get-nps-score
 ```
 
 ```bash
-node /Users/USER/node scripts/dist/cli.js list-feedback --limit 10 --sort desc
+node $HOME/node scripts/dist/cli.js list-feedback --limit 10 --sort desc
 ```
 
 ```bash
-node /Users/USER/node scripts/dist/cli.js list-feedback --since 2024-01-15 --limit 50
+node $HOME/node scripts/dist/cli.js list-feedback --since 2024-01-15 --limit 50
 ```
 
 ```bash
-node /Users/USER/node scripts/dist/cli.js list-customers --email john@example.com
+node $HOME/node scripts/dist/cli.js list-customers --email john@example.com
 ```
 
 ```bash
-node /Users/USER/node scripts/dist/cli.js create-customers --data '[{"email":"test@example.com","first_name":"Test"}]'
+node $HOME/node scripts/dist/cli.js create-customers --data '[{"email":"test@example.com","first_name":"Test"}]'
 ```
 
 ```bash
-node /Users/USER/node scripts/dist/cli.js send-survey --email customer@example.com --campaign-id abc123 --delay-days 1
+node $HOME/node scripts/dist/cli.js send-survey --email customer@example.com --campaign-id abc123 --delay-days 1
 ```
 
 ## How It Works

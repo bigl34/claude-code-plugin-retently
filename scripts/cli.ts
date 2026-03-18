@@ -5,7 +5,7 @@
  * Zod-validated CLI for Retently NPS/CSAT feedback operations.
  */
 
-import { z, createCommand, runCli, cacheCommands, cliTypes } from "@local/cli-utils";
+import { z, createCommand, runCli, cacheCommands, cliTypes, wrapUntrustedField, buildSafeOutput } from "@local/cli-utils";
 import { RetentlyClient } from "./retently-client.js";
 
 // Define commands with Zod schemas
@@ -41,7 +41,27 @@ const commands = {
       const { page, limit, email } = args as {
         page?: number; limit?: number; email?: string;
       };
-      return client.listCustomers({ page, perPage: limit, email });
+      const result = await client.listCustomers({ page, perPage: limit, email });
+
+      const customers = (result?.data || []);
+      const wrappedCustomers = (Array.isArray(customers) ? customers : []).map((c: any) => ({
+        metadata: {
+          id: c.id,
+          created_date: c.created_date || c.createdDate,
+        },
+        content: {
+          name: wrapUntrustedField("name", c.name, { maxChars: 200 }),
+          firstName: wrapUntrustedField("first_name", c.first_name || c.firstName, { maxChars: 200 }),
+          lastName: wrapUntrustedField("last_name", c.last_name || c.lastName, { maxChars: 200 }),
+          email: wrapUntrustedField("email", c.email, { maxChars: 200 }),
+          companyName: wrapUntrustedField("company_name", c.company_name || c.company, { maxChars: 200 }),
+        },
+      }));
+
+      return buildSafeOutput(
+        { command: "list-customers", count: wrappedCustomers.length, page: result?.meta?.page, total: result?.meta?.total },
+        { customers: wrappedCustomers }
+      );
     },
     "List customers"
   ),
@@ -52,7 +72,23 @@ const commands = {
     }),
     async (args, client: RetentlyClient) => {
       const { id } = args as { id: string };
-      return client.getCustomer(id);
+      const result = await client.getCustomer(id);
+
+      const c = (result as any)?.data || result;
+      return buildSafeOutput(
+        {
+          command: "get-customer",
+          id: c.id,
+          created_date: c.created_date || c.createdDate,
+        },
+        {
+          name: wrapUntrustedField("name", c.name, { maxChars: 200 }),
+          firstName: wrapUntrustedField("first_name", c.first_name || c.firstName, { maxChars: 200 }),
+          lastName: wrapUntrustedField("last_name", c.last_name || c.lastName, { maxChars: 200 }),
+          email: wrapUntrustedField("email", c.email, { maxChars: 200 }),
+          companyName: wrapUntrustedField("company_name", c.company_name || c.company, { maxChars: 200 }),
+        }
+      );
     },
     "Get customer by ID"
   ),
@@ -103,7 +139,29 @@ const commands = {
         page?: number; limit?: number; campaignId?: string;
         since?: string; until?: string; sort?: "asc" | "desc";
       };
-      return client.listFeedback({ page, perPage: limit, campaignId, since, until, sort });
+      const result = await client.listFeedback({ page, perPage: limit, campaignId, since, until, sort });
+
+      const feedback = (result?.data || []);
+      const wrappedFeedback = (Array.isArray(feedback) ? feedback : []).map((f: any) => ({
+        metadata: {
+          id: f.id,
+          score: f.score,
+          campaign_id: f.campaign_id || f.campaignId,
+          created_date: f.created_date || f.createdDate,
+          channel: f.channel,
+          tags: f.tags,
+        },
+        content: {
+          comment: wrapUntrustedField("comment", f.comment, { maxChars: 8000 }),
+          customerName: wrapUntrustedField("customer_name", f.customer_name || f.firstName || f.name, { maxChars: 200 }),
+          customerEmail: wrapUntrustedField("customer_email", f.customer_email || f.email, { maxChars: 200 }),
+        },
+      }));
+
+      return buildSafeOutput(
+        { command: "list-feedback", count: wrappedFeedback.length, page: result?.meta?.page, total: result?.meta?.total },
+        { feedback: wrappedFeedback }
+      );
     },
     "List survey responses"
   ),
@@ -114,7 +172,25 @@ const commands = {
     }),
     async (args, client: RetentlyClient) => {
       const { id } = args as { id: string };
-      return client.getFeedback(id);
+      const result = await client.getFeedback(id);
+
+      const f = (result as any)?.data || result;
+      return buildSafeOutput(
+        {
+          command: "get-feedback",
+          id: f.id,
+          score: f.score,
+          campaign_id: f.campaign_id || f.campaignId,
+          created_date: f.created_date || f.createdDate,
+          channel: f.channel,
+          tags: f.tags,
+        },
+        {
+          comment: wrapUntrustedField("comment", f.comment, { maxChars: 8000 }),
+          customerName: wrapUntrustedField("customer_name", f.customer_name || f.firstName || f.name, { maxChars: 200 }),
+          customerEmail: wrapUntrustedField("customer_email", f.customer_email || f.email, { maxChars: 200 }),
+        }
+      );
     },
     "Get feedback by ID"
   ),
@@ -145,7 +221,24 @@ const commands = {
     }),
     async (args, client: RetentlyClient) => {
       const { limit } = args as { limit?: number };
-      return client.listCampaigns({ limit });
+      const result = await client.listCampaigns({ limit });
+
+      const campaigns = (result?.data || (result as any)?.campaigns || []);
+      const wrappedCampaigns = (Array.isArray(campaigns) ? campaigns : []).map((c: any) => ({
+        metadata: {
+          id: c.id,
+          type: c.type,
+          status: c.status,
+        },
+        content: {
+          name: wrapUntrustedField("name", c.name, { maxChars: 200 }),
+        },
+      }));
+
+      return buildSafeOutput(
+        { command: "list-campaigns", count: wrappedCampaigns.length },
+        { campaigns: wrappedCampaigns }
+      );
     },
     "List survey campaigns"
   ),
@@ -158,7 +251,24 @@ const commands = {
     }),
     async (args, client: RetentlyClient) => {
       const { page, limit } = args as { page?: number; limit?: number };
-      return client.listCompanies({ page, perPage: limit });
+      const result = await client.listCompanies({ page, perPage: limit });
+
+      const companies = (result?.data || []);
+      const wrappedCompanies = (Array.isArray(companies) ? companies : []).map((c: any) => ({
+        metadata: {
+          id: c.id,
+          nps_score: c.nps_score,
+        },
+        content: {
+          name: wrapUntrustedField("name", c.name, { maxChars: 200 }),
+          domain: wrapUntrustedField("domain", c.domain, { maxChars: 200 }),
+        },
+      }));
+
+      return buildSafeOutput(
+        { command: "list-companies", count: wrappedCompanies.length },
+        { companies: wrappedCompanies }
+      );
     },
     "List companies with metrics"
   ),
