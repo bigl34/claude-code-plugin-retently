@@ -12,23 +12,21 @@
  * - Rate limit tracking
  */
 
-import { readFileSync } from 'fs';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { loadServiceConfig, z } from "@local/cli-utils";
 import { PluginCache, TTL, createCacheKey } from "@local/plugin-cache";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+import { fetchWithRetry } from "@local/retry";
 
 // ============================================================================
 // Type Definitions
 // ============================================================================
 
-interface Config {
-  retently: {
-    apiKey: string;
-  };
-}
+const RetentlyConfigSchema = z.object({
+  retently: z.object({
+    apiKey: z.string().min(1),
+  }),
+});
+
+type Config = z.infer<typeof RetentlyConfigSchema>;
 
 interface Customer {
   id: string;
@@ -64,6 +62,22 @@ interface Campaign {
   created_at: string;
 }
 
+/**
+ * Survey template. `surveyQuestions` is returned only by the detail endpoint,
+ * not by the listing.
+ *
+ * Probed against the live account 2026-08-17: email sender/auth/reply routing
+ * and hosted logo/image settings are NOT exposed here, so branding work still
+ * needs the web UI.
+ */
+interface Template {
+  id: string;
+  name: string;
+  channel: string;
+  metric: string;
+  surveyQuestions?: unknown[];
+}
+
 interface Company {
   id: string;
   domain?: string;
@@ -81,15 +95,22 @@ interface ScoreResponse {
   total_responses?: number;
 }
 
+interface ListMeta {
+  total?: number;
+  page?: number;
+  per_page?: number;
+  next_page?: number | null;
+}
+
 interface ListResponse<T> {
   data: T[];
-  meta?: {
-    total?: number;
-    page?: number;
-    per_page?: number;
-    next_page?: number | null;
-  };
+  meta?: ListMeta;
 }
+
+type RawListResponse<T, TCollectionKey extends string> = {
+  data?: T[] | (Record<string, unknown> & Partial<Record<TCollectionKey, T[]>>);
+  meta?: ListMeta;
+} & Partial<Record<TCollectionKey, T[]>>;
 
 interface RateLimitInfo {
   remaining: number | null;
@@ -107,6 +128,45 @@ interface BulkResult {
     success: boolean;
     error?: string;
   }>;
+}
+
+function pathSegment(value: string): string {
+  return encodeURIComponent(value);
+}
+
+function normalizeListResponse<T, TCollectionKey extends string>(
+  response: RawListResponse<T, TCollectionKey>,
+  collectionKey: TCollectionKey,
+): ListResponse<T> {
+  if (!response || typeof response !== "object" || Array.isArray(response)) {
+    throw new Error(`Invalid Retently list response: expected an object containing ${collectionKey}`);
+  }
+
+  if (Array.isArray(response.data)) {
+    return { data: response.data, meta: response.meta };
+  }
+
+  if (response.data && typeof response.data === "object") {
+    const nestedItems = response.data[collectionKey];
+    if (nestedItems !== undefined) {
+      if (!Array.isArray(nestedItems)) {
+        throw new Error(`Invalid Retently list response: data.${collectionKey} must be an array`);
+      }
+      return { data: nestedItems as T[], meta: response.meta };
+    }
+  }
+
+  const legacyItems = response[collectionKey];
+  if (legacyItems !== undefined) {
+    if (!Array.isArray(legacyItems)) {
+      throw new Error(`Invalid Retently list response: ${collectionKey} must be an array`);
+    }
+    return { data: legacyItems as T[], meta: response.meta };
+  }
+
+  throw new Error(
+    `Invalid Retently list response: expected data.${collectionKey}, ${collectionKey}, or data to be an array`,
+  );
 }
 
 // ============================================================================
@@ -133,23 +193,10 @@ export class RetentlyClient {
   };
 
   constructor() {
-    // When compiled, __dirname is dist/, so look in parent for config.json
-    const configPath = join(__dirname, '..', 'config.json');
-    try {
-      const configFile: Config = JSON.parse(readFileSync(configPath, 'utf-8'));
-      if (!configFile.retently?.apiKey) {
-        throw new Error('Missing required config: retently.apiKey');
-      }
-      this.config = configFile.retently;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        throw new Error(
-          'config.json not found. Ensure credential symlink exists: ' +
-          'ln -s YOUR_CREDENTIALS_PATH/configs/retently-feedback-manager.json config.json'
-        );
-      }
-      throw error;
-    }
+    const configFile = loadServiceConfig("retently-feedback-manager", {
+      schema: RetentlyConfigSchema,
+    });
+    this.config = configFile.retently;
   }
 
   // ============================================
@@ -239,26 +286,26 @@ export class RetentlyClient {
       }
     }
 
-    // Set up abort controller for timeout
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    const fetchOptions: RequestInit = {
+      method,
+      headers: {
+        'X-Api-Key': this.config.apiKey,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+    };
+
+    if (body && method !== 'GET') {
+      fetchOptions.body = JSON.stringify(body);
+    }
 
     try {
-      const fetchOptions: RequestInit = {
-        method,
-        headers: {
-          'X-Api-Key': this.config.apiKey,
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-        },
-        signal: controller.signal,
-      };
-
-      if (body && method !== 'GET') {
-        fetchOptions.body = JSON.stringify(body);
-      }
-
-      const response = await fetch(url.toString(), fetchOptions);
+      const response = await fetchWithRetry(
+        url.toString(),
+        fetchOptions,
+        { maxRetries: 3, timeoutMs: timeout },
+        "Retently.request"
+      );
 
       // Parse rate limit headers
       this.lastRateLimitInfo = {
@@ -273,7 +320,10 @@ export class RetentlyClient {
           : null,
       };
 
-      // Handle rate limiting
+      // fetchWithRetry already retries 429 with exponential backoff. If a 429
+      // still reaches us here, it means retries were not exhausted (e.g. 429 is
+      // not classified retryable due to config override). Keep the historical
+      // detailed error in case that ever happens.
       if (response.status === 429) {
         const retryAfter = response.headers.get('Retry-After') || '60';
         throw new Error(
@@ -287,14 +337,23 @@ export class RetentlyClient {
         throw new Error(`Retently API error (${response.status}): ${errorText}`);
       }
 
-      return response.json() as Promise<T>;
+      if (response.status === 204) {
+        return undefined as T;
+      }
+
+      const responseText = await response.text();
+      if (!responseText.trim()) {
+        return undefined as T;
+      }
+
+      return JSON.parse(responseText) as T;
     } catch (error) {
-      if ((error as Error).name === 'AbortError') {
+      // fetchWithRetry wraps timeout errors as "Operation failed after N attempts: ..."
+      // so we match on the broader timeout-message family.
+      if (error instanceof Error && /(timed out|timeout|abort)/i.test(error.message)) {
         throw new Error(`Request timeout after ${timeout}ms: ${endpoint}`);
       }
       throw error;
-    } finally {
-      clearTimeout(timeoutId);
     }
   }
 
@@ -337,7 +396,11 @@ export class RetentlyClient {
           params.email = options.email;
         }
 
-        return this.request<ListResponse<Customer>>('/customers', { params });
+        const response = await this.request<RawListResponse<Customer, "subscribers">>(
+          '/customers',
+          { params },
+        );
+        return normalizeListResponse(response, "subscribers");
       },
       { ttl: TTL.FIVE_MINUTES, bypassCache: this.cacheDisabled }
     );
@@ -356,7 +419,7 @@ export class RetentlyClient {
 
     return cache.getOrFetch(
       cacheKey,
-      () => this.request<Customer>(`/customers/${customerId}`),
+      () => this.request<Customer>(`/customers/${pathSegment(customerId)}`),
       { ttl: TTL.MINUTE, bypassCache: this.cacheDisabled }
     );
   }
@@ -500,7 +563,11 @@ export class RetentlyClient {
           sort: options.sort,
         };
 
-        return this.request<ListResponse<Feedback>>('/feedback', { params });
+        const response = await this.request<RawListResponse<Feedback, "responses">>(
+          '/feedback',
+          { params },
+        );
+        return normalizeListResponse(response, "responses");
       },
       { ttl: TTL.MINUTE * 2, bypassCache }
     );
@@ -519,7 +586,7 @@ export class RetentlyClient {
 
     return cache.getOrFetch(
       cacheKey,
-      () => this.request<Feedback>(`/feedback/${feedbackId}`),
+      () => this.request<Feedback>(`/feedback/${pathSegment(feedbackId)}`),
       { ttl: TTL.MINUTE, bypassCache: this.cacheDisabled }
     );
   }
@@ -601,6 +668,65 @@ export class RetentlyClient {
         };
 
         return this.request<ListResponse<Campaign>>('/campaigns', { params });
+      },
+      { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
+    );
+  }
+
+  // ============================================
+  // TEMPLATE OPERATIONS (read-only)
+  // ============================================
+
+  /**
+   * Lists survey templates.
+   *
+   * Deliberately takes no pagination options. Probed against the live account
+   * on 2026-08-17: `/templates` ignores `limit`, `page`, `pageSize` and
+   * `per_page` alike and always returns the complete set, so offering a limit
+   * would advertise filtering the provider does not perform.
+   *
+   * The listing nests its rows under `templates` rather than `data` — see
+   * normalizeListResponse.
+   */
+  async listTemplates(): Promise<ListResponse<Template>> {
+    const cacheKey = createCacheKey("templates", {});
+
+    return cache.getOrFetch(
+      cacheKey,
+      async () => {
+        const response = await this.request<RawListResponse<Template, "templates">>(
+          '/templates'
+        );
+        return normalizeListResponse(response, "templates");
+      },
+      { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
+    );
+  }
+
+  /**
+   * Fetches a single survey template, including its `surveyQuestions`.
+   *
+   * Note the envelope differs from the listing: the detail endpoint returns
+   * the template under `data`, not `templates`.
+   */
+  async getTemplate(templateId: string): Promise<Template> {
+    if (!templateId) {
+      throw new Error("templateId is required");
+    }
+
+    const cacheKey = createCacheKey("template", { id: templateId });
+
+    return cache.getOrFetch(
+      cacheKey,
+      async () => {
+        const response = await this.request<{ data?: Template } & Partial<Template>>(
+          `/templates/${pathSegment(templateId)}`
+        );
+        const template = response?.data ?? (response as Template);
+        if (!template || typeof template !== "object" || !template.id) {
+          throw new Error(`Invalid Retently template response for ${templateId}`);
+        }
+        return template;
       },
       { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
     );
@@ -707,8 +833,10 @@ export class RetentlyClient {
       },
     });
 
-    // Invalidate feedback cache
+    // Tag changes affect both detail reads and cached list rows that include
+    // tags, so refresh both surfaces immediately after the write.
     cache.invalidate(createCacheKey("feedback_detail", { id: feedbackId }));
+    cache.invalidatePattern(/^feedback(?:\?|$)/);
 
     return {
       write_operation: true,

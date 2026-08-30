@@ -3,7 +3,7 @@
 
 Dedicated agent for Retently NPS/CSAT feedback operations with isolated API access
 
-![Version](https://img.shields.io/badge/version-1.2.0-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
+![Version](https://img.shields.io/badge/version-1.2.1-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
 
 ## Features
 
@@ -89,27 +89,27 @@ node scripts/dist/cli.js list-customers
 ## Usage Examples
 
 ```bash
-node $HOME/node scripts/dist/cli.js get-nps-score
+bash $HOME/biz/scripts/cli-run.sh retently-feedback-manager get-nps-score
 ```
 
 ```bash
-node $HOME/node scripts/dist/cli.js list-feedback --limit 10 --sort desc
+bash $HOME/biz/scripts/cli-run.sh retently-feedback-manager list-feedback --limit 10 --sort desc
 ```
 
 ```bash
-node $HOME/node scripts/dist/cli.js list-feedback --since 2024-01-15 --limit 50
+bash $HOME/biz/scripts/cli-run.sh retently-feedback-manager list-feedback --since 2024-01-15 --limit 50
 ```
 
 ```bash
-node $HOME/node scripts/dist/cli.js list-customers --email john@example.com
+bash $HOME/biz/scripts/cli-run.sh retently-feedback-manager list-customers --email john@example.com
 ```
 
 ```bash
-node $HOME/node scripts/dist/cli.js create-customers --data '[{"email":"test@example.com","first_name":"Test"}]'
+bash $HOME/biz/scripts/cli-run.sh retently-feedback-manager create-customers --data '[{"email":"test@example.com","first_name":"Test"}]'
 ```
 
 ```bash
-node $HOME/node scripts/dist/cli.js send-survey --email customer@example.com --campaign-id abc123 --delay-days 1
+bash $HOME/biz/scripts/cli-run.sh retently-feedback-manager send-survey --email customer@example.com --campaign-id abc123 --delay-days 1
 ```
 
 ## How It Works

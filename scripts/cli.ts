@@ -7,9 +7,53 @@
 
 import { z, createCommand, runCli, cacheCommands, cliTypes, wrapUntrustedField, buildSafeOutput } from "@local/cli-utils";
 import { RetentlyClient } from "./retently-client.js";
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const MAX_TAG_LENGTH = 200;
+
+function wrapFeedbackTags(tags: unknown): ReturnType<typeof wrapUntrustedField>[] {
+  if (!Array.isArray(tags)) return [];
+  return tags.map((tag) => wrapUntrustedField("tag", tag, { maxChars: 200 }));
+}
+
+function normalizeTag(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new Error("Tags must be strings");
+  }
+  const tag = value.trim();
+  if (!tag) {
+    throw new Error("Tags must not be empty");
+  }
+  if (tag.length > MAX_TAG_LENGTH) {
+    throw new Error(`Tags must be ${MAX_TAG_LENGTH} characters or fewer`);
+  }
+  return tag;
+}
+
+export function parseFeedbackTags(tagsStr: string): string[] {
+  const input = tagsStr.trim();
+  let tags: string[];
+  try {
+    const parsed = JSON.parse(input) as unknown;
+    if (!Array.isArray(parsed)) {
+      throw new Error("Tags must be a JSON array of strings");
+    }
+    tags = parsed.map(normalizeTag);
+  } catch (err) {
+    if (/^[\[{"]/.test(input)) {
+      throw new Error(`Invalid JSON tags: ${(err as Error).message}`);
+    }
+    tags = input.split(",").map(normalizeTag);
+  }
+  if (tags.length === 0) {
+    throw new Error("At least one tag is required");
+  }
+  return tags;
+}
 
 // Define commands with Zod schemas
-const commands = {
+export const commands = {
   "list-tools": createCommand(
     z.object({}),
     async (_args, client: RetentlyClient) => ({
@@ -19,6 +63,7 @@ const commands = {
         "list-feedback", "get-feedback",
         "get-nps-score", "get-csat-score", "get-ces-score",
         "list-campaigns", "list-companies",
+        "list-templates", "get-template",
         "api-status", "list-tools",
         "cache-stats", "cache-clear", "cache-invalidate",
       ],
@@ -27,7 +72,8 @@ const commands = {
         "send-survey", "add-tags",
       ],
     }),
-    "List available commands"
+    "List available commands",
+    { sideEffect: "read" }
   ),
 
   // ==================== Customer Commands ====================
@@ -63,7 +109,8 @@ const commands = {
         { customers: wrappedCustomers }
       );
     },
-    "List customers"
+    "List customers",
+    { sideEffect: "read" }
   ),
 
   "get-customer": createCommand(
@@ -90,7 +137,8 @@ const commands = {
         }
       );
     },
-    "Get customer by ID"
+    "Get customer by ID",
+    { sideEffect: "read" }
   ),
 
   "create-customers": createCommand(
@@ -110,7 +158,8 @@ const commands = {
       }
       return client.createCustomers(customers);
     },
-    "Bulk create/update customers"
+    "Bulk create/update customers",
+    { sideEffect: "write", requiresConfirmation: true }
   ),
 
   "delete-customer": createCommand(
@@ -121,7 +170,8 @@ const commands = {
       const { email } = args as { email: string };
       return client.deleteCustomer(email);
     },
-    "Delete customer by email"
+    "Delete customer by email",
+    { sideEffect: "destructive", requiresConfirmation: true }
   ),
 
   // ==================== Feedback Commands ====================
@@ -149,12 +199,12 @@ const commands = {
           campaign_id: f.campaign_id || f.campaignId,
           created_date: f.created_date || f.createdDate,
           channel: f.channel,
-          tags: f.tags,
         },
         content: {
           comment: wrapUntrustedField("comment", f.comment, { maxChars: 8000 }),
           customerName: wrapUntrustedField("customer_name", f.customer_name || f.firstName || f.name, { maxChars: 200 }),
           customerEmail: wrapUntrustedField("customer_email", f.customer_email || f.email, { maxChars: 200 }),
+          tags: wrapFeedbackTags(f.tags),
         },
       }));
 
@@ -163,7 +213,8 @@ const commands = {
         { feedback: wrappedFeedback }
       );
     },
-    "List survey responses"
+    "List survey responses",
+    { sideEffect: "read" }
   ),
 
   "get-feedback": createCommand(
@@ -183,35 +234,39 @@ const commands = {
           campaign_id: f.campaign_id || f.campaignId,
           created_date: f.created_date || f.createdDate,
           channel: f.channel,
-          tags: f.tags,
         },
         {
           comment: wrapUntrustedField("comment", f.comment, { maxChars: 8000 }),
           customerName: wrapUntrustedField("customer_name", f.customer_name || f.firstName || f.name, { maxChars: 200 }),
           customerEmail: wrapUntrustedField("customer_email", f.customer_email || f.email, { maxChars: 200 }),
+          tags: wrapFeedbackTags(f.tags),
         }
       );
     },
-    "Get feedback by ID"
+    "Get feedback by ID",
+    { sideEffect: "read" }
   ),
 
   // ==================== Score Commands ====================
   "get-nps-score": createCommand(
     z.object({}),
     async (_args, client: RetentlyClient) => client.getNpsScore(),
-    "Get current NPS score"
+    "Get current NPS score",
+    { sideEffect: "read" }
   ),
 
   "get-csat-score": createCommand(
     z.object({}),
     async (_args, client: RetentlyClient) => client.getCsatScore(),
-    "Get current CSAT score"
+    "Get current CSAT score",
+    { sideEffect: "read" }
   ),
 
   "get-ces-score": createCommand(
     z.object({}),
     async (_args, client: RetentlyClient) => client.getCesScore(),
-    "Get current CES score"
+    "Get current CES score",
+    { sideEffect: "read" }
   ),
 
   // ==================== Campaign Commands ====================
@@ -240,7 +295,75 @@ const commands = {
         { campaigns: wrappedCampaigns }
       );
     },
-    "List survey campaigns"
+    "List survey campaigns",
+    { sideEffect: "read" }
+  ),
+
+  // ==================== Template Commands (read-only) ====================
+  "list-templates": createCommand(
+    // No limit/page options on purpose: probed 2026-08-17, /templates ignores
+    // every pagination parameter and returns the complete set.
+    z.object({}),
+    async (_args, client: RetentlyClient) => {
+      const result = await client.listTemplates();
+
+      const templates = Array.isArray(result?.data) ? result.data : [];
+      const wrappedTemplates = templates.map((t) => ({
+        metadata: {
+          id: t.id,
+          channel: t.channel,
+          metric: t.metric,
+        },
+        content: {
+          name: wrapUntrustedField("name", t.name, { maxChars: 200 }),
+        },
+      }));
+
+      return buildSafeOutput(
+        { command: "list-templates", count: wrappedTemplates.length },
+        { templates: wrappedTemplates }
+      );
+    },
+    "List survey templates (returns all; this endpoint is not paginated)",
+    { sideEffect: "read" }
+  ),
+
+  "get-template": createCommand(
+    z.object({
+      templateId: z.string().min(1).describe("Template ID (from list-templates)"),
+    }),
+    async (args, client: RetentlyClient) => {
+      const { templateId } = args as { templateId: string };
+      const template = await client.getTemplate(templateId);
+
+      const questions = Array.isArray(template.surveyQuestions) ? template.surveyQuestions : [];
+      const wrappedQuestions = questions.map((question: unknown, index: number) =>
+        wrapUntrustedField(
+          `surveyQuestions[${index}]`,
+          typeof question === "string" ? question : JSON.stringify(question),
+          { maxChars: 2000 }
+        )
+      );
+
+      return buildSafeOutput(
+        { command: "get-template", templateId },
+        {
+          template: {
+            metadata: {
+              id: template.id,
+              channel: template.channel,
+              metric: template.metric,
+            },
+            content: {
+              name: wrapUntrustedField("name", template.name, { maxChars: 200 }),
+              surveyQuestions: wrappedQuestions,
+            },
+          },
+        }
+      );
+    },
+    "Get one survey template including its questions. Does NOT expose email sender/reply routing or hosted logo settings - those still require the Retently web UI.",
+    { sideEffect: "read" }
   ),
 
   // ==================== Company Commands ====================
@@ -270,7 +393,8 @@ const commands = {
         { companies: wrappedCompanies }
       );
     },
-    "List companies with metrics"
+    "List companies with metrics",
+    { sideEffect: "read" }
   ),
 
   // ==================== Survey Commands (WRITE) ====================
@@ -286,7 +410,8 @@ const commands = {
       };
       return client.sendSurvey({ email, campaignId, delayDays });
     },
-    "Trigger transactional survey"
+    "Trigger transactional survey",
+    { sideEffect: "external_send", requiresConfirmation: true }
   ),
 
   // ==================== Tag Commands (WRITE) ====================
@@ -297,18 +422,11 @@ const commands = {
     }),
     async (args, client: RetentlyClient) => {
       const { feedbackId, tags: tagsStr } = args as { feedbackId: string; tags: string };
-      let tags: string[];
-      try {
-        tags = JSON.parse(tagsStr);
-        if (!Array.isArray(tags)) {
-          throw new Error("Tags must be a JSON array of strings");
-        }
-      } catch {
-        tags = tagsStr.split(",").map(t => t.trim());
-      }
+      const tags = parseFeedbackTags(tagsStr);
       return client.addFeedbackTags(feedbackId, tags);
     },
-    "Add tags to feedback"
+    "Add tags to feedback",
+    { sideEffect: "write", requiresConfirmation: true }
   ),
 
   // ==================== Utility Commands ====================
@@ -319,15 +437,26 @@ const commands = {
       api_base: "https://app.retently.com/api/v2",
       max_requests_per_minute: 150,
     }),
-    "Show rate limit info"
+    "Show rate limit info",
+    { sideEffect: "read" }
   ),
 
   // Pre-built cache commands
   ...cacheCommands<RetentlyClient>(),
 };
 
-// Run CLI
-runCli(commands, RetentlyClient, {
-  programName: "retently-cli",
-  description: "Retently NPS/CSAT feedback management",
-});
+let isCliEntry = false;
+try {
+  isCliEntry =
+    process.argv[1] !== undefined &&
+    import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+} catch {
+  isCliEntry = false;
+}
+
+if (isCliEntry) {
+  runCli(commands, RetentlyClient, {
+    programName: "retently-cli",
+    description: "Retently NPS/CSAT feedback management",
+  });
+}
