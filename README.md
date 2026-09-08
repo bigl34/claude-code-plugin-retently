@@ -3,7 +3,7 @@
 
 Dedicated agent for Retently NPS/CSAT feedback operations with isolated API access
 
-![Version](https://img.shields.io/badge/version-1.2.1-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
+![Version](https://img.shields.io/badge/version-1.2.2-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
 
 ## Features
 
@@ -40,11 +40,11 @@ Dedicated agent for Retently NPS/CSAT feedback operations with isolated API acce
 git clone https://github.com/bigl34/claude-code-plugin-retently.git
 cd claude-code-plugin-retently
 cp config.template.json config.json  # fill in your credentials
-cd scripts && npm install
+npm --prefix scripts install
 ```
 
 ```bash
-node scripts/dist/cli.js list-customers
+npm --prefix scripts run cli -- list-customers
 ```
 
 ## Installation
@@ -89,27 +89,27 @@ node scripts/dist/cli.js list-customers
 ## Usage Examples
 
 ```bash
-bash $HOME/biz/scripts/cli-run.sh retently-feedback-manager get-nps-score
+npm --prefix "scripts" run cli -- get-nps-score
 ```
 
 ```bash
-bash $HOME/biz/scripts/cli-run.sh retently-feedback-manager list-feedback --limit 10 --sort desc
+npm --prefix "scripts" run cli -- list-feedback --limit 10 --sort desc
 ```
 
 ```bash
-bash $HOME/biz/scripts/cli-run.sh retently-feedback-manager list-feedback --since 2024-01-15 --limit 50
+npm --prefix "scripts" run cli -- list-feedback --since 2024-01-15 --limit 50
 ```
 
 ```bash
-bash $HOME/biz/scripts/cli-run.sh retently-feedback-manager list-customers --email john@example.com
+npm --prefix "scripts" run cli -- list-customers --email john@example.com
 ```
 
 ```bash
-bash $HOME/biz/scripts/cli-run.sh retently-feedback-manager create-customers --data '[{"email":"test@example.com","first_name":"Test"}]'
+npm --prefix "scripts" run cli -- create-customers --data '[{"email":"test@example.com","first_name":"Test"}]'
 ```
 
 ```bash
-bash $HOME/biz/scripts/cli-run.sh retently-feedback-manager send-survey --email customer@example.com --campaign-id abc123 --delay-days 1
+npm --prefix "scripts" run cli -- send-survey --email customer@example.com --campaign-id abc123 --delay-days 1
 ```
 
 ## How It Works

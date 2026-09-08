@@ -5,12 +5,12 @@
   "scripts": {
     "cli": "tsx cli.ts",
     "build": "tsc",
-    "start": "tsx cli.ts"
+    "start": "tsx cli.ts",
+    "test": "tsx --test tests/*.test.ts"
   },
   "dependencies": {
     "@local/plugin-cache": "github:bigl34/claude-code-plugin-cache",
-    "@local/cli-utils": "github:bigl34/claude-code-plugin-shared",
-    "@local/retry": "github:bigl34/claude-code-plugin-retry"
+    "@local/cli-utils": "github:bigl34/claude-code-plugin-shared"
   },
   "devDependencies": {
     "@types/node": "22.19.19",

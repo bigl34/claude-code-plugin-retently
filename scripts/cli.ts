@@ -1,12 +1,7 @@
 #!/usr/bin/env npx tsx
-/**
- * Retently Feedback Manager CLI
- *
- * Zod-validated CLI for Retently NPS/CSAT feedback operations.
- */
 
 import { z, createCommand, runCli, cacheCommands, cliTypes, wrapUntrustedField, buildSafeOutput } from "@local/cli-utils";
-import { RetentlyClient } from "./retently-client.js";
+import { RetentlyClient, validateRetentlyCustomerWrites } from "./retently-client.js";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -52,7 +47,6 @@ export function parseFeedbackTags(tagsStr: string): string[] {
   return tags;
 }
 
-// Define commands with Zod schemas
 export const commands = {
   "list-tools": createCommand(
     z.object({}),
@@ -76,7 +70,6 @@ export const commands = {
     { sideEffect: "read" }
   ),
 
-  // ==================== Customer Commands ====================
   "list-customers": createCommand(
     z.object({
       page: cliTypes.int(1).optional().describe("Page number"),
@@ -147,12 +140,9 @@ export const commands = {
     }),
     async (args, client: RetentlyClient) => {
       const { data } = args as { data: string };
-      let customers: Array<{ email: string; [key: string]: unknown }>;
+      let customers: ReturnType<typeof validateRetentlyCustomerWrites>;
       try {
-        customers = JSON.parse(data);
-        if (!Array.isArray(customers)) {
-          throw new Error("Data must be a JSON array");
-        }
+        customers = validateRetentlyCustomerWrites(JSON.parse(data) as unknown);
       } catch (e) {
         throw new Error(`Invalid JSON data: ${(e as Error).message}`);
       }
@@ -174,7 +164,6 @@ export const commands = {
     { sideEffect: "destructive", requiresConfirmation: true }
   ),
 
-  // ==================== Feedback Commands ====================
   "list-feedback": createCommand(
     z.object({
       page: cliTypes.int(1).optional().describe("Page number"),
@@ -247,7 +236,6 @@ export const commands = {
     { sideEffect: "read" }
   ),
 
-  // ==================== Score Commands ====================
   "get-nps-score": createCommand(
     z.object({}),
     async (_args, client: RetentlyClient) => client.getNpsScore(),
@@ -269,7 +257,6 @@ export const commands = {
     { sideEffect: "read" }
   ),
 
-  // ==================== Campaign Commands ====================
   "list-campaigns": createCommand(
     z.object({
       limit: cliTypes.int(1, 100).optional().describe("Max results"),
@@ -299,10 +286,7 @@ export const commands = {
     { sideEffect: "read" }
   ),
 
-  // ==================== Template Commands (read-only) ====================
   "list-templates": createCommand(
-    // No limit/page options on purpose: probed 2026-08-17, /templates ignores
-    // every pagination parameter and returns the complete set.
     z.object({}),
     async (_args, client: RetentlyClient) => {
       const result = await client.listTemplates();
@@ -366,7 +350,6 @@ export const commands = {
     { sideEffect: "read" }
   ),
 
-  // ==================== Company Commands ====================
   "list-companies": createCommand(
     z.object({
       page: cliTypes.int(1).optional().describe("Page number"),
@@ -397,7 +380,6 @@ export const commands = {
     { sideEffect: "read" }
   ),
 
-  // ==================== Survey Commands (WRITE) ====================
   "send-survey": createCommand(
     z.object({
       email: z.string().min(1).describe("Recipient email"),
@@ -414,7 +396,6 @@ export const commands = {
     { sideEffect: "external_send", requiresConfirmation: true }
   ),
 
-  // ==================== Tag Commands (WRITE) ====================
   "add-tags": createCommand(
     z.object({
       feedbackId: z.string().min(1).describe("Feedback ID"),
@@ -429,7 +410,6 @@ export const commands = {
     { sideEffect: "write", requiresConfirmation: true }
   ),
 
-  // ==================== Utility Commands ====================
   "api-status": createCommand(
     z.object({}),
     async (_args, client: RetentlyClient) => ({
@@ -441,7 +421,6 @@ export const commands = {
     { sideEffect: "read" }
   ),
 
-  // Pre-built cache commands
   ...cacheCommands<RetentlyClient>(),
 };
 
@@ -460,3 +439,4 @@ if (isCliEntry) {
     description: "Retently NPS/CSAT feedback management",
   });
 }
+

@@ -1,24 +1,29 @@
-/**
- * Retently NPS/CSAT/CES Feedback API Client
- *
- * Direct client for the Retently REST API v2.
- * Handles customers, feedback responses, campaigns, and score metrics.
- *
- * Key features:
- * - Customer management (create, list, delete)
- * - Feedback retrieval with date filtering
- * - NPS, CSAT, and CES score metrics
- * - Survey sending and response tagging
- * - Rate limit tracking
- */
 
-import { loadServiceConfig, z } from "@local/cli-utils";
+import {
+  getServiceModuleDir,
+  loadServiceConfig,
+  z,
+} from "@local/cli-utils";
 import { PluginCache, TTL, createCacheKey } from "@local/plugin-cache";
-import { fetchWithRetry } from "@local/retry";
+import {
+  calculateBackoff,
+  createTimeoutController,
+  DEFAULT_RETRY_CONFIG,
+  parseRetryAfterMs,
+  withRetryThrow,
+} from "./vendor/retry/index.js";
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { spawnSync } from "node:child_process";
+import { dirname, join } from "node:path";
 
-// ============================================================================
-// Type Definitions
-// ============================================================================
 
 const RetentlyConfigSchema = z.object({
   retently: z.object({
@@ -35,9 +40,98 @@ interface Customer {
   last_name?: string;
   company?: string;
   tags?: string[];
-  properties?: Record<string, unknown>;
+  properties?: RetentlyCustomerReadProperty[];
+  unset_properties?: string[];
+  unset_tags?: string[];
   created_at?: string;
   updated_at?: string;
+}
+
+export interface RetentlyCustomerReadProperty {
+  label: string;
+  type: "text" | "date" | "integer" | "collection" | "boolean";
+  value: unknown;
+}
+
+const RetentlyCustomerWritePropertySchema = z.discriminatedUnion("type", [
+  z.object({
+    label: z.string().trim().min(1),
+    type: z.literal("string"),
+    value: z.string(),
+  }).strict(),
+  z.object({
+    label: z.string().trim().min(1),
+    type: z.literal("date"),
+    value: z.string().trim().min(1),
+  }).strict(),
+  z.object({
+    label: z.string().trim().min(1),
+    type: z.literal("integer"),
+    value: z.number().int(),
+  }).strict(),
+  z.object({
+    label: z.string().trim().min(1),
+    type: z.literal("collection"),
+    value: z.array(z.union([z.string(), z.number(), z.boolean()])),
+  }).strict(),
+  z.object({
+    label: z.string().trim().min(1),
+    type: z.literal("boolean"),
+    value: z.boolean(),
+  }).strict(),
+]);
+
+const RetentlyCustomerWritePropertiesSchema = z.array(RetentlyCustomerWritePropertySchema);
+
+const RetentlyCustomerWriteSchema = z.object({
+  email: z.string().trim().min(1),
+  first_name: z.string().optional(),
+  last_name: z.string().optional(),
+  company: z.string().optional(),
+  tags: z.array(z.string()).optional(),
+  unset_properties: z.array(z.string()).optional(),
+  unset_tags: z.array(z.string()).optional(),
+  properties: RetentlyCustomerWritePropertiesSchema.optional(),
+}).strict();
+
+export type RetentlyCustomerWriteProperty = z.infer<typeof RetentlyCustomerWritePropertySchema>;
+type RetentlyCustomerWrite = z.infer<typeof RetentlyCustomerWriteSchema>;
+
+function formatValidationIssues(error: z.ZodError): string {
+  return error.issues
+    .map((issue) => `${issue.path.length > 0 ? issue.path.join(".") : "properties"}: ${issue.message}`)
+    .join("; ");
+}
+
+export function validateRetentlyCustomerWriteProperties(
+  properties: unknown,
+  context = "properties",
+): RetentlyCustomerWriteProperty[] {
+  const parsed = RetentlyCustomerWritePropertiesSchema.safeParse(properties);
+  if (!parsed.success) {
+    throw new Error(`Invalid Retently write ${context}: ${formatValidationIssues(parsed.error)}`);
+  }
+  return parsed.data;
+}
+
+export function validateRetentlyCustomerWrites(customers: unknown): RetentlyCustomerWrite[] {
+  if (!Array.isArray(customers)) {
+    throw new Error("Retently customers must be an array");
+  }
+
+  return customers.map((entry, index) => {
+    const parsed = RetentlyCustomerWriteSchema.safeParse(entry);
+    if (!parsed.success) {
+      const issues = parsed.error.issues
+        .map((issue) => {
+          const path = issue.path.length > 0 ? `.${issue.path.join(".")}` : "";
+          return `customer[${index}]${path}: ${issue.message}`;
+        })
+        .join("; ");
+      throw new Error(`Invalid Retently write ${issues}`);
+    }
+    return parsed.data;
+  });
 }
 
 interface Feedback {
@@ -62,14 +156,6 @@ interface Campaign {
   created_at: string;
 }
 
-/**
- * Survey template. `surveyQuestions` is returned only by the detail endpoint,
- * not by the listing.
- *
- * Probed against the live account 2026-08-17: email sender/auth/reply routing
- * and hosted logo/image settings are NOT exposed here, so branding work still
- * needs the web UI.
- */
 interface Template {
   id: string;
   name: string;
@@ -116,6 +202,270 @@ interface RateLimitInfo {
   remaining: number | null;
   limit: number | null;
   reset: number | null;
+}
+
+const RETENTLY_REQUESTS_PER_MINUTE = 150;
+const RETENTLY_RATE_LIMIT_WINDOW_MS = 60_000;
+const RETENTLY_RETRY_AFTER_MAX_MS = 300_000;
+const RATE_LIMIT_LOCK_TIMEOUT_SECONDS = 12;
+const EPOCH_MILLISECONDS_THRESHOLD = 1_000_000_000_000;
+
+interface RetentlyRateLimiterOptions {
+  now?: () => number;
+  sleep?: (milliseconds: number) => Promise<void>;
+  statePath?: string;
+  onSharedLockAcquired?: () => void;
+}
+
+interface RetentlyRateLimitState {
+  recentRequests: number[];
+  observedRemaining: number | null;
+  observedResetAt: number | null;
+  observedBlockUntil: number | null;
+}
+
+function parseRateLimitResetAt(value: string | null): number | null {
+  const normalized = value?.trim();
+  if (!normalized || !/^\d+$/.test(normalized)) return null;
+
+  const numericValue = Number(normalized);
+  if (!Number.isSafeInteger(numericValue)) return null;
+
+  const resetAt = numericValue >= EPOCH_MILLISECONDS_THRESHOLD
+    ? numericValue
+    : numericValue * 1000;
+  return Number.isFinite(new Date(resetAt).getTime()) ? resetAt : null;
+}
+
+function parseRateLimitCount(value: string | null): number | null {
+  const normalized = value?.trim();
+  if (!normalized || !/^\d+$/.test(normalized)) return null;
+
+  const count = Number(normalized);
+  return Number.isSafeInteger(count) ? count : null;
+}
+
+function parseRetryAfterResetAt(value: string | null, now: number): number | null {
+  const normalized = value?.trim();
+  if (!normalized) return null;
+
+  const seconds = Number(normalized);
+  if (Number.isFinite(seconds)) {
+    return now + Math.max(0, seconds) * 1000;
+  }
+
+  const resetAt = Date.parse(normalized);
+  return Number.isFinite(resetAt) ? resetAt : null;
+}
+
+function emptyRateLimitState(): RetentlyRateLimitState {
+  return {
+    recentRequests: [],
+    observedRemaining: null,
+    observedResetAt: null,
+    observedBlockUntil: null,
+  };
+}
+
+export class RetentlyRateLimiter {
+  private readonly now: () => number;
+  private readonly sleep: (milliseconds: number) => Promise<void>;
+  private readonly statePath?: string;
+  private readonly onSharedLockAcquired?: () => void;
+  private state = emptyRateLimitState();
+
+  constructor(options: RetentlyRateLimiterOptions = {}) {
+    this.now = options.now ?? Date.now;
+    this.sleep = options.sleep
+      ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+    this.statePath = options.statePath;
+    this.onSharedLockAcquired = options.onSharedLockAcquired;
+  }
+
+  async acquire(): Promise<void> {
+    while (true) {
+      const now = this.now();
+      const waitMilliseconds = await this.updateState((state) => {
+        const currentState = this.normalizeState(state, now);
+        const localWait = currentState.recentRequests.length >= RETENTLY_REQUESTS_PER_MINUTE
+          ? currentState.recentRequests[0] + RETENTLY_RATE_LIMIT_WINDOW_MS - now
+          : 0;
+        const providerWait = currentState.observedRemaining === 0
+          && currentState.observedBlockUntil !== null
+          ? currentState.observedBlockUntil - now
+          : 0;
+        const wait = Math.max(localWait, providerWait);
+
+        if (wait <= 0) {
+          currentState.recentRequests = [...currentState.recentRequests, now];
+          if (currentState.observedRemaining !== null) {
+            currentState.observedRemaining = Math.max(0, currentState.observedRemaining - 1);
+          }
+        }
+
+        return { state: currentState, result: wait };
+      });
+
+      if (waitMilliseconds <= 0) {
+        return;
+      }
+
+      await this.sleep(Math.min(waitMilliseconds, RETENTLY_RATE_LIMIT_WINDOW_MS));
+    }
+  }
+
+  async observe(headers: Headers, exhausted = false): Promise<void> {
+    const now = this.now();
+    const remaining = parseRateLimitCount(headers.get("X-RateLimit-Remaining"));
+    if (remaining === null && !exhausted) return;
+
+    const reportedResetAt = parseRateLimitResetAt(headers.get("X-RateLimit-Reset"));
+    const retryAfterResetAt = exhausted
+      ? parseRetryAfterResetAt(headers.get("Retry-After"), now)
+      : null;
+    const explicitResetAt = reportedResetAt ?? retryAfterResetAt;
+    const maxWait = exhausted ? RETENTLY_RETRY_AFTER_MAX_MS : RETENTLY_RATE_LIMIT_WINDOW_MS;
+
+    await this.updateState((state) => {
+      const currentState = this.normalizeState(state, now);
+      const observedRemaining = Math.min(
+        remaining ?? 0,
+        RETENTLY_REQUESTS_PER_MINUTE,
+      );
+      const observationResetAt = explicitResetAt === null
+        ? currentState.observedResetAt ?? now + (exhausted ? 0 : RETENTLY_RATE_LIMIT_WINDOW_MS)
+        : explicitResetAt;
+      const observationBlockUntil = explicitResetAt === null
+        ? currentState.observedBlockUntil
+          ?? now + (exhausted ? 0 : RETENTLY_RATE_LIMIT_WINDOW_MS)
+        : Math.min(explicitResetAt, now + maxWait);
+
+      if (observationResetAt <= now) {
+        return { state: currentState, result: undefined };
+      }
+      if (
+        currentState.observedResetAt !== null
+        && observationResetAt < currentState.observedResetAt
+      ) {
+        return { state: currentState, result: undefined };
+      }
+
+      if (
+        currentState.observedResetAt === null
+        || observationResetAt > currentState.observedResetAt
+      ) {
+        currentState.observedRemaining = observedRemaining;
+        currentState.observedResetAt = observationResetAt;
+        currentState.observedBlockUntil = observationBlockUntil;
+        return { state: currentState, result: undefined };
+      }
+
+      currentState.observedRemaining = Math.min(
+        currentState.observedRemaining ?? observedRemaining,
+        observedRemaining,
+      );
+      return { state: currentState, result: undefined };
+    });
+  }
+
+  private normalizeState(state: RetentlyRateLimitState, now: number): RetentlyRateLimitState {
+    const cutoff = now - RETENTLY_RATE_LIMIT_WINDOW_MS;
+    const recentRequests = state.recentRequests
+      .filter((timestamp) => Number.isFinite(timestamp) && timestamp > cutoff && timestamp <= now)
+      .slice(-RETENTLY_REQUESTS_PER_MINUTE);
+    const blockUntil = state.observedBlockUntil ?? state.observedResetAt;
+    const providerWindowElapsed = blockUntil !== null && now >= blockUntil;
+
+    return {
+      recentRequests,
+      observedRemaining: providerWindowElapsed ? null : state.observedRemaining,
+      observedResetAt: providerWindowElapsed ? null : state.observedResetAt,
+      observedBlockUntil: providerWindowElapsed ? null : blockUntil,
+    };
+  }
+
+  private async updateState<T>(
+    update: (state: RetentlyRateLimitState) => { state: RetentlyRateLimitState; result: T },
+  ): Promise<T> {
+    if (!this.statePath) {
+      const updated = update(this.state);
+      this.state = updated.state;
+      return updated.result;
+    }
+
+    const lockDescriptor = this.acquireFileLock();
+    try {
+      this.onSharedLockAcquired?.();
+      const updated = update(this.readSharedState());
+      this.writeSharedState(updated.state);
+      return updated.result;
+    } finally {
+      closeSync(lockDescriptor);
+    }
+  }
+
+  private acquireFileLock(): number {
+    const statePath = this.statePath!;
+    const lockPath = `${statePath}.lock`;
+    mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 });
+    const lockDescriptor = openSync(lockPath, "a", 0o600);
+    try {
+      const result = spawnSync(
+        "flock",
+        ["-x", "-w", String(RATE_LIMIT_LOCK_TIMEOUT_SECONDS), "3"],
+        {
+          encoding: "utf8",
+          stdio: ["ignore", "ignore", "pipe", lockDescriptor],
+          timeout: (RATE_LIMIT_LOCK_TIMEOUT_SECONDS + 1) * 1000,
+        },
+      );
+      if (result.error) throw result.error;
+      if (result.status !== 0) {
+        const detail = result.stderr.trim();
+        throw new Error(
+          `Retently rate-limit lock unavailable after ${RATE_LIMIT_LOCK_TIMEOUT_SECONDS}s`
+          + (detail ? `: ${detail}` : ""),
+        );
+      }
+      return lockDescriptor;
+    } catch (error) {
+      closeSync(lockDescriptor);
+      throw error;
+    }
+  }
+
+  private readSharedState(): RetentlyRateLimitState {
+    try {
+      const parsed = JSON.parse(readFileSync(this.statePath!, "utf8")) as Partial<RetentlyRateLimitState>;
+      return {
+        recentRequests: Array.isArray(parsed.recentRequests) ? parsed.recentRequests : [],
+        observedRemaining: typeof parsed.observedRemaining === "number"
+          ? parsed.observedRemaining
+          : null,
+        observedResetAt: typeof parsed.observedResetAt === "number"
+          ? parsed.observedResetAt
+          : null,
+        observedBlockUntil: typeof parsed.observedBlockUntil === "number"
+          ? parsed.observedBlockUntil
+          : null,
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError) {
+        return emptyRateLimitState();
+      }
+      throw error;
+    }
+  }
+
+  private writeSharedState(state: RetentlyRateLimitState): void {
+    const temporaryPath = `${this.statePath}.${process.pid}.tmp`;
+    try {
+      writeFileSync(temporaryPath, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+      renameSync(temporaryPath, this.statePath!);
+    } finally {
+      rmSync(temporaryPath, { force: true });
+    }
+  }
 }
 
 interface BulkResult {
@@ -169,23 +519,18 @@ function normalizeListResponse<T, TCollectionKey extends string>(
   );
 }
 
-// ============================================================================
-// Cache Setup
-// ============================================================================
 
 const cache = new PluginCache({
   namespace: "retently-feedback-manager",
   defaultTTL: TTL.FIVE_MINUTES,
 });
 
-// ============================================================================
-// Retently API Client
-// ============================================================================
 
 export class RetentlyClient {
   private baseUrl = 'https://app.retently.com/api/v2';
   private config: Config['retently'];
   private cacheDisabled: boolean = false;
+  private rateLimiter: RetentlyRateLimiter;
   private lastRateLimitInfo: RateLimitInfo = {
     remaining: null,
     limit: null,
@@ -197,75 +542,50 @@ export class RetentlyClient {
       schema: RetentlyConfigSchema,
     });
     this.config = configFile.retently;
+    this.rateLimiter = new RetentlyRateLimiter({
+      statePath: join(
+        getServiceModuleDir("retently-feedback-manager"),
+        "..",
+        "..",
+        "var",
+        "retently-feedback-manager",
+        "rate-limit.json",
+      ),
+    });
   }
 
-  // ============================================
-  // CACHE CONTROL
-  // ============================================
 
-  /**
-   * Disables caching for all subsequent requests.
-   */
   disableCache(): void {
     this.cacheDisabled = true;
     cache.disable();
   }
 
-  /**
-   * Re-enables caching after it was disabled.
-   */
   enableCache(): void {
     this.cacheDisabled = false;
     cache.enable();
   }
 
-  /**
-   * Returns cache statistics including hit/miss counts.
-   */
   getCacheStats() {
     return cache.getStats();
   }
 
-  /**
-   * Clears all cached data.
-   * @returns Number of cache entries cleared
-   */
   clearCache(): number {
     return cache.clear();
   }
 
-  /**
-   * Invalidates a specific cache entry by key.
-   */
   invalidateCacheKey(key: string): boolean {
     return cache.invalidate(key);
   }
 
-  /**
-   * Invalidates cache entries matching a pattern.
-   * @param pattern - Regex pattern to match cache keys
-   * @returns Number of entries invalidated
-   */
   invalidateCachePattern(pattern: RegExp): number {
     return cache.invalidatePattern(pattern);
   }
 
-  // ============================================
-  // RATE LIMIT INFO
-  // ============================================
 
-  /**
-   * Returns the rate limit information from the last API request.
-   *
-   * @returns Object with remaining, limit, and reset timestamp
-   */
   getRateLimitInfo(): RateLimitInfo {
     return { ...this.lastRateLimitInfo };
   }
 
-  // --------------------------------------------------------------------------
-  // HTTP Request Handler
-  // --------------------------------------------------------------------------
 
   private async request<T>(
     endpoint: string,
@@ -278,7 +598,6 @@ export class RetentlyClient {
   ): Promise<T> {
     const { method = 'GET', params = {}, body, timeout = 30000 } = options;
 
-    // Build URL with query params
     const url = new URL(`${this.baseUrl}${endpoint}`);
     for (const [key, value] of Object.entries(params)) {
       if (value !== undefined) {
@@ -300,14 +619,12 @@ export class RetentlyClient {
     }
 
     try {
-      const response = await fetchWithRetry(
+      const response = await this.fetchWithRateLimitAccounting(
         url.toString(),
         fetchOptions,
-        { maxRetries: 3, timeoutMs: timeout },
-        "Retently.request"
+        timeout,
       );
 
-      // Parse rate limit headers
       this.lastRateLimitInfo = {
         remaining: response.headers.get('X-RateLimit-Remaining')
           ? parseInt(response.headers.get('X-RateLimit-Remaining')!, 10)
@@ -320,10 +637,6 @@ export class RetentlyClient {
           : null,
       };
 
-      // fetchWithRetry already retries 429 with exponential backoff. If a 429
-      // still reaches us here, it means retries were not exhausted (e.g. 429 is
-      // not classified retryable due to config override). Keep the historical
-      // detailed error in case that ever happens.
       if (response.status === 429) {
         const retryAfter = response.headers.get('Retry-After') || '60';
         throw new Error(
@@ -348,8 +661,6 @@ export class RetentlyClient {
 
       return JSON.parse(responseText) as T;
     } catch (error) {
-      // fetchWithRetry wraps timeout errors as "Operation failed after N attempts: ..."
-      // so we match on the broader timeout-message family.
       if (error instanceof Error && /(timed out|timeout|abort)/i.test(error.message)) {
         throw new Error(`Request timeout after ${timeout}ms: ${endpoint}`);
       }
@@ -357,21 +668,70 @@ export class RetentlyClient {
     }
   }
 
-  // ============================================
-  // CUSTOMER OPERATIONS
-  // ============================================
+  private async fetchWithRateLimitAccounting(
+    url: string,
+    options: RequestInit,
+    timeout: number,
+  ): Promise<Response> {
+    const method = (options.method ?? "GET").toUpperCase();
+    const operationKind = method === "GET" || method === "HEAD" ? "read" : "write";
+    const backoffMaxDelayMs = DEFAULT_RETRY_CONFIG.maxDelayMs;
 
-  /**
-   * Lists customers with optional filtering and pagination.
-   *
-   * @param options - Query options
-   * @param options.page - Page number
-   * @param options.perPage - Results per page
-   * @param options.email - Filter by email address
-   * @returns Paginated list of customers
-   *
-   * @cached TTL: 5 minutes
-   */
+    return withRetryThrow(
+      async () => {
+        await this.getRateLimiter().acquire();
+        const { controller, cleanup } = createTimeoutController(timeout);
+
+        try {
+          const response = await fetch(url, {
+            ...options,
+            signal: controller.signal,
+          });
+          await this.getRateLimiter().observe(response.headers, response.status === 429);
+
+          if (!response.ok && DEFAULT_RETRY_CONFIG.retryableErrors.includes(String(response.status))) {
+            const error = new Error(`HTTP ${response.status}: ${response.statusText}`);
+            const retryError = error as Error & { status: number; retryAfterMs?: number };
+            retryError.status = response.status;
+            if (response.status === 429) {
+              retryError.retryAfterMs = parseRetryAfterMs(response.headers.get("Retry-After"));
+            }
+            throw retryError;
+          }
+
+          return response;
+        } finally {
+          cleanup();
+        }
+      },
+      {
+        maxRetries: 3,
+        timeoutMs: timeout,
+        operationKind,
+        maxDelayMs: RETENTLY_RETRY_AFTER_MAX_MS,
+        nextDelayMs: ({ attempt, error }) => {
+          const retryAfterMs = (error as { retryAfterMs?: number } | null)?.retryAfterMs;
+          if (typeof retryAfterMs === "number" && retryAfterMs >= 0) {
+            return Math.min(retryAfterMs, RETENTLY_RETRY_AFTER_MAX_MS);
+          }
+          return calculateBackoff(attempt, {
+            ...DEFAULT_RETRY_CONFIG,
+            maxDelayMs: backoffMaxDelayMs,
+          });
+        },
+      },
+      "Retently.request",
+    );
+  }
+
+  private getRateLimiter(): RetentlyRateLimiter {
+    if (!this.rateLimiter) {
+      this.rateLimiter = new RetentlyRateLimiter();
+    }
+    return this.rateLimiter;
+  }
+
+
   async listCustomers(options: {
     page?: number;
     perPage?: number;
@@ -391,7 +751,6 @@ export class RetentlyClient {
           per_page: options.perPage,
         };
 
-        // Email filter if provided
         if (options.email) {
           params.email = options.email;
         }
@@ -406,14 +765,6 @@ export class RetentlyClient {
     );
   }
 
-  /**
-   * Gets a specific customer by ID.
-   *
-   * @param customerId - Retently customer ID
-   * @returns Customer object with details
-   *
-   * @cached TTL: 1 minute
-   */
   async getCustomer(customerId: string): Promise<Customer> {
     const cacheKey = createCacheKey("customer", { id: customerId });
 
@@ -424,20 +775,11 @@ export class RetentlyClient {
     );
   }
 
-  /**
-   * Creates customers in bulk.
-   *
-   * Deduplicates by email and processes in batches of 1000.
-   *
-   * @param customers - Array of customer objects to create
-   * @returns Bulk result with success/error counts
-   *
-   * @invalidates customer/*
-   */
-  async createCustomers(customers: Array<Partial<Customer>>): Promise<BulkResult> {
-    // Dedupe by email
+  async createCustomers(customers: RetentlyCustomerWrite[]): Promise<BulkResult> {
+    const validatedCustomers = validateRetentlyCustomerWrites(customers);
+
     const seen = new Set<string>();
-    const deduped = customers.filter(c => {
+    const deduped = validatedCustomers.filter(c => {
       if (!c.email) return false;
       if (seen.has(c.email.toLowerCase())) return false;
       seen.add(c.email.toLowerCase());
@@ -448,7 +790,6 @@ export class RetentlyClient {
     let successCount = 0;
     let errorCount = 0;
 
-    // Chunk into batches of 1000
     const chunkSize = 1000;
     for (let i = 0; i < deduped.length; i += chunkSize) {
       const chunk = deduped.slice(i, i + chunkSize);
@@ -456,16 +797,14 @@ export class RetentlyClient {
       try {
         await this.request('/customers', {
           method: 'POST',
-          body: { customers: chunk },
+          body: { subscribers: chunk },
         });
 
-        // Mark all in chunk as success
         for (const customer of chunk) {
           results.push({ email: customer.email!, success: true });
           successCount++;
         }
       } catch (error) {
-        // Mark all in chunk as failed
         for (const customer of chunk) {
           results.push({
             email: customer.email!,
@@ -477,7 +816,6 @@ export class RetentlyClient {
       }
     }
 
-    // Invalidate customer caches after mutation
     cache.invalidatePattern(/^customer/);
 
     return {
@@ -489,21 +827,12 @@ export class RetentlyClient {
     };
   }
 
-  /**
-   * Deletes a customer by email.
-   *
-   * @param email - Customer email to delete
-   * @returns Delete confirmation
-   *
-   * @invalidates customer/*
-   */
   async deleteCustomer(email: string): Promise<{ write_operation: true; action: string; deleted: boolean }> {
     await this.request('/customers', {
       method: 'DELETE',
-      body: { email },
+      body: { subscribers: [{ email }] },
     });
 
-    // Invalidate customer caches after mutation
     cache.invalidatePattern(/^customer/);
 
     return {
@@ -513,33 +842,15 @@ export class RetentlyClient {
     };
   }
 
-  // ============================================
-  // FEEDBACK OPERATIONS
-  // ============================================
 
-  /**
-   * Lists feedback responses with optional filtering.
-   *
-   * @param options - Query options
-   * @param options.page - Page number
-   * @param options.perPage - Results per page
-   * @param options.campaignId - Filter by campaign
-   * @param options.since - Filter responses created after this date (ISO format)
-   * @param options.until - Filter responses created before this date
-   * @param options.sort - Sort order: "asc" or "desc"
-   * @returns Paginated list of feedback responses
-   *
-   * @cached TTL: 2 minutes (bypassed when using since filter for polling)
-   */
   async listFeedback(options: {
     page?: number;
     perPage?: number;
     campaignId?: string;
-    since?: string;  // ISO date
-    until?: string;  // ISO date
+    since?: string;
+    until?: string;
     sort?: 'asc' | 'desc';
   } = {}): Promise<ListResponse<Feedback>> {
-    // Bypass cache when using --since (for polling)
     const bypassCache = this.cacheDisabled || !!options.since;
 
     const cacheKey = createCacheKey("feedback", {
@@ -573,14 +884,6 @@ export class RetentlyClient {
     );
   }
 
-  /**
-   * Gets a specific feedback response by ID.
-   *
-   * @param feedbackId - Retently feedback ID
-   * @returns Feedback object with score, comment, and metadata
-   *
-   * @cached TTL: 1 minute
-   */
   async getFeedback(feedbackId: string): Promise<Feedback> {
     const cacheKey = createCacheKey("feedback_detail", { id: feedbackId });
 
@@ -591,19 +894,7 @@ export class RetentlyClient {
     );
   }
 
-  // ============================================
-  // SCORE OPERATIONS
-  // ============================================
 
-  /**
-   * Gets the overall NPS (Net Promoter Score).
-   *
-   * Returns score from -100 to 100 with promoter/passive/detractor counts.
-   *
-   * @returns NPS score and breakdown
-   *
-   * @cached TTL: 1 hour
-   */
   async getNpsScore(): Promise<ScoreResponse> {
     return cache.getOrFetch(
       "nps_score",
@@ -612,13 +903,6 @@ export class RetentlyClient {
     );
   }
 
-  /**
-   * Gets the overall CSAT (Customer Satisfaction) score.
-   *
-   * @returns CSAT score (typically 0-100)
-   *
-   * @cached TTL: 1 hour
-   */
   async getCsatScore(): Promise<ScoreResponse> {
     return cache.getOrFetch(
       "csat_score",
@@ -627,13 +911,6 @@ export class RetentlyClient {
     );
   }
 
-  /**
-   * Gets the overall CES (Customer Effort Score).
-   *
-   * @returns CES score
-   *
-   * @cached TTL: 1 hour
-   */
   async getCesScore(): Promise<ScoreResponse> {
     return cache.getOrFetch(
       "ces_score",
@@ -642,19 +919,7 @@ export class RetentlyClient {
     );
   }
 
-  // ============================================
-  // CAMPAIGN OPERATIONS
-  // ============================================
 
-  /**
-   * Lists available survey campaigns.
-   *
-   * @param options - Query options
-   * @param options.limit - Max campaigns to return
-   * @returns List of campaigns with ID, name, type, and status
-   *
-   * @cached TTL: 15 minutes
-   */
   async listCampaigns(options: {
     limit?: number;
   } = {}): Promise<ListResponse<Campaign>> {
@@ -673,21 +938,7 @@ export class RetentlyClient {
     );
   }
 
-  // ============================================
-  // TEMPLATE OPERATIONS (read-only)
-  // ============================================
 
-  /**
-   * Lists survey templates.
-   *
-   * Deliberately takes no pagination options. Probed against the live account
-   * on 2026-08-17: `/templates` ignores `limit`, `page`, `pageSize` and
-   * `per_page` alike and always returns the complete set, so offering a limit
-   * would advertise filtering the provider does not perform.
-   *
-   * The listing nests its rows under `templates` rather than `data` — see
-   * normalizeListResponse.
-   */
   async listTemplates(): Promise<ListResponse<Template>> {
     const cacheKey = createCacheKey("templates", {});
 
@@ -703,12 +954,6 @@ export class RetentlyClient {
     );
   }
 
-  /**
-   * Fetches a single survey template, including its `surveyQuestions`.
-   *
-   * Note the envelope differs from the listing: the detail endpoint returns
-   * the template under `data`, not `templates`.
-   */
   async getTemplate(templateId: string): Promise<Template> {
     if (!templateId) {
       throw new Error("templateId is required");
@@ -732,20 +977,7 @@ export class RetentlyClient {
     );
   }
 
-  // ============================================
-  // COMPANY OPERATIONS
-  // ============================================
 
-  /**
-   * Lists companies with aggregated scores.
-   *
-   * @param options - Query options
-   * @param options.page - Page number
-   * @param options.perPage - Results per page
-   * @returns List of companies with NPS/CSAT scores
-   *
-   * @cached TTL: 15 minutes
-   */
   async listCompanies(options: {
     page?: number;
     perPage?: number;
@@ -769,31 +1001,23 @@ export class RetentlyClient {
     );
   }
 
-  // ============================================
-  // SURVEY OPERATIONS (WRITE)
-  // ============================================
 
-  /**
-   * Queues a survey to be sent to a customer.
-   *
-   * @param data - Survey data
-   * @param data.email - Customer email to survey
-   * @param data.campaignId - Campaign ID to use
-   * @param data.delayDays - Days to delay sending (optional)
-   * @param data.properties - Custom properties to pass
-   * @returns Confirmation that survey was queued
-   */
   async sendSurvey(data: {
     email: string;
     campaignId: string;
     delayDays?: number;
-    properties?: Record<string, unknown>;
+    properties?: RetentlyCustomerWriteProperty[];
   }): Promise<{ write_operation: true; action: string; queued: boolean }> {
+    const properties = data.properties === undefined
+      ? undefined
+      : validateRetentlyCustomerWriteProperties(data.properties, "survey properties");
     const body = {
-      email: data.email,
-      campaign_id: data.campaignId,
+      campaign: data.campaignId,
       delay: data.delayDays,
-      properties: data.properties,
+      subscribers: [{
+        email: data.email,
+        properties,
+      }],
     };
 
     await this.request('/survey', {
@@ -808,19 +1032,7 @@ export class RetentlyClient {
     };
   }
 
-  // ============================================
-  // TAG OPERATIONS (WRITE)
-  // ============================================
 
-  /**
-   * Adds tags to a feedback response.
-   *
-   * @param feedbackId - Feedback ID to tag
-   * @param tags - Array of tags to add
-   * @returns Confirmation that tags were added
-   *
-   * @invalidates feedback_detail/{feedbackId}
-   */
   async addFeedbackTags(
     feedbackId: string,
     tags: string[]
@@ -828,13 +1040,12 @@ export class RetentlyClient {
     await this.request('/response/tags', {
       method: 'POST',
       body: {
-        feedback_id: feedbackId,
+        id: feedbackId,
         tags,
+        op: 'append',
       },
     });
 
-    // Tag changes affect both detail reads and cached list rows that include
-    // tags, so refresh both surfaces immediately after the write.
     cache.invalidate(createCacheKey("feedback_detail", { id: feedbackId }));
     cache.invalidatePattern(/^feedback(?:\?|$)/);
 
@@ -845,15 +1056,7 @@ export class RetentlyClient {
     };
   }
 
-  // ============================================
-  // UTILITY
-  // ============================================
 
-  /**
-   * Returns available CLI commands.
-   *
-   * @returns Array of command names
-   */
   listTools(): string[] {
     return [
       'list-customers',
