@@ -1,7 +1,6 @@
 ---
 name: retently-feedback-manager
 description: Use this agent for Retently NPS/CSAT feedback operations including customers, survey responses, scores, and campaigns. This agent has exclusive access to the Retently API.
-model: claude-opus-4-6
 color: secondary
 mode: subagent
 ---
