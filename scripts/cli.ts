@@ -2,6 +2,7 @@
 
 import { z, createCommand, runCli, cacheCommands, cliTypes, wrapUntrustedField, buildSafeOutput } from "@local/cli-utils";
 import { RetentlyClient, validateRetentlyCustomerWrites } from "./retently-client.js";
+import { listFeedbackForQa } from "./qa-feedback.js";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -54,7 +55,7 @@ export const commands = {
       tools: client.listTools(),
       read_operations: [
         "list-customers", "get-customer",
-        "list-feedback", "get-feedback",
+        "list-feedback", "list-feedback-qa", "get-feedback",
         "get-nps-score", "get-csat-score", "get-ces-score",
         "list-campaigns", "list-companies",
         "list-templates", "get-template",
@@ -204,6 +205,20 @@ export const commands = {
     },
     "List survey responses",
     { sideEffect: "read" }
+  ),
+
+  "list-feedback-qa": createCommand(
+    z.object({
+      since: z.string().optional().describe("Inclusive local start date (ISO 8601)"),
+      until: z.string().optional().describe("Inclusive local end date (ISO 8601)"),
+      campaignId: z.string().optional().describe("Campaign ID"),
+      sort: z.enum(["asc", "desc"]).optional().describe("Provider page sort order"),
+      pageSize: cliTypes.int(1, 100).optional().describe("Results requested per page"),
+      maxPages: cliTypes.int(1, 100).optional().describe("Hard page cap"),
+    }),
+    async (args, client: RetentlyClient) => listFeedbackForQa(client, args),
+    "Bounded QA feedback read with local date filtering, deduplication, and completeness diagnostics",
+    { sideEffect: "read", requiresSafeOutput: true }
   ),
 
   "get-feedback": createCommand(

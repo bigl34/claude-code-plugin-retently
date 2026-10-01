@@ -529,7 +529,6 @@ const cache = new PluginCache({
 export class RetentlyClient {
   private baseUrl = 'https://app.retently.com/api/v2';
   private config: Config['retently'];
-  private cacheDisabled: boolean = false;
   private rateLimiter: RetentlyRateLimiter;
   private lastRateLimitInfo: RateLimitInfo = {
     remaining: null,
@@ -556,12 +555,10 @@ export class RetentlyClient {
 
 
   disableCache(): void {
-    this.cacheDisabled = true;
     cache.disable();
   }
 
   enableCache(): void {
-    this.cacheDisabled = false;
     cache.enable();
   }
 
@@ -761,7 +758,7 @@ export class RetentlyClient {
         );
         return normalizeListResponse(response, "subscribers");
       },
-      { ttl: TTL.FIVE_MINUTES, bypassCache: this.cacheDisabled }
+      { ttl: TTL.FIVE_MINUTES }
     );
   }
 
@@ -771,7 +768,7 @@ export class RetentlyClient {
     return cache.getOrFetch(
       cacheKey,
       () => this.request<Customer>(`/customers/${pathSegment(customerId)}`),
-      { ttl: TTL.MINUTE, bypassCache: this.cacheDisabled }
+      { ttl: TTL.MINUTE }
     );
   }
 
@@ -851,7 +848,7 @@ export class RetentlyClient {
     until?: string;
     sort?: 'asc' | 'desc';
   } = {}): Promise<ListResponse<Feedback>> {
-    const bypassCache = this.cacheDisabled || !!options.since;
+    const bypassCache = !!options.since;
 
     const cacheKey = createCacheKey("feedback", {
       page: options.page,
@@ -890,7 +887,7 @@ export class RetentlyClient {
     return cache.getOrFetch(
       cacheKey,
       () => this.request<Feedback>(`/feedback/${pathSegment(feedbackId)}`),
-      { ttl: TTL.MINUTE, bypassCache: this.cacheDisabled }
+      { ttl: TTL.MINUTE }
     );
   }
 
@@ -899,7 +896,7 @@ export class RetentlyClient {
     return cache.getOrFetch(
       "nps_score",
       () => this.request<ScoreResponse>('/nps/score'),
-      { ttl: TTL.HOUR, bypassCache: this.cacheDisabled }
+      { ttl: TTL.HOUR }
     );
   }
 
@@ -907,7 +904,7 @@ export class RetentlyClient {
     return cache.getOrFetch(
       "csat_score",
       () => this.request<ScoreResponse>('/csat/score'),
-      { ttl: TTL.HOUR, bypassCache: this.cacheDisabled }
+      { ttl: TTL.HOUR }
     );
   }
 
@@ -915,7 +912,7 @@ export class RetentlyClient {
     return cache.getOrFetch(
       "ces_score",
       () => this.request<ScoreResponse>('/ces/score'),
-      { ttl: TTL.HOUR, bypassCache: this.cacheDisabled }
+      { ttl: TTL.HOUR }
     );
   }
 
@@ -934,7 +931,7 @@ export class RetentlyClient {
 
         return this.request<ListResponse<Campaign>>('/campaigns', { params });
       },
-      { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
+      { ttl: TTL.FIFTEEN_MINUTES }
     );
   }
 
@@ -950,7 +947,7 @@ export class RetentlyClient {
         );
         return normalizeListResponse(response, "templates");
       },
-      { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
+      { ttl: TTL.FIFTEEN_MINUTES }
     );
   }
 
@@ -973,7 +970,7 @@ export class RetentlyClient {
         }
         return template;
       },
-      { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
+      { ttl: TTL.FIFTEEN_MINUTES }
     );
   }
 
@@ -997,7 +994,7 @@ export class RetentlyClient {
 
         return this.request<ListResponse<Company>>('/companies', { params });
       },
-      { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
+      { ttl: TTL.FIFTEEN_MINUTES }
     );
   }
 
@@ -1064,6 +1061,7 @@ export class RetentlyClient {
       'create-customers',
       'delete-customer',
       'list-feedback',
+      'list-feedback-qa',
       'get-feedback',
       'get-nps-score',
       'get-csat-score',

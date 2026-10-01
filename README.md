@@ -3,7 +3,7 @@
 
 Dedicated agent for Retently NPS/CSAT feedback operations with isolated API access
 
-![Version](https://img.shields.io/badge/version-1.2.3-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
+![Version](https://img.shields.io/badge/version-1.3.0-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
 
 ## Features
 
@@ -11,6 +11,7 @@ Dedicated agent for Retently NPS/CSAT feedback operations with isolated API acce
 - **list-customers** — List customers
 - **get-customer** — Get customer by ID
 - **list-feedback** — List survey responses
+- **list-feedback-qa** — Bounded feedback read for exact QA/date reviews with completeness diagnostics
 - **get-feedback** — Get feedback by ID
 - **get-nps-score** — Current NPS score
 - **get-csat-score** — Current CSAT score
@@ -60,22 +61,23 @@ npm --prefix scripts run cli -- list-customers
 
 ### Read Operations (Always Allowed)
 
-| Command            | Description                 | Key Flags                                                            |
-| ------------------ | --------------------------- | -------------------------------------------------------------------- |
-| `list-customers`   | List customers              | `--limit`, `--page`, `--email`                                       |
-| `get-customer`     | Get customer by ID          | `--id`                                                               |
-| `list-feedback`    | List survey responses       | `--limit`, `--page`, `--since`, `--until`, `--campaign-id`, `--sort` |
-| `get-feedback`     | Get feedback by ID          | `--id`                                                               |
-| `get-nps-score`    | Current NPS score           | (none)                                                               |
-| `get-csat-score`   | Current CSAT score          | (none)                                                               |
-| `get-ces-score`    | Current CES score           | (none)                                                               |
-| `list-campaigns`   | List survey campaigns       | `--limit`                                                            |
-| `list-companies`   | List companies with metrics | `--limit`, `--page`                                                  |
-| `api-status`       | Show rate limit info        | (none)                                                               |
-| `list-tools`       | List all commands           | (none)                                                               |
-| `cache-stats`      | Show cache statistics       | (none)                                                               |
-| `cache-clear`      | Clear all cache             | (none)                                                               |
-| `cache-invalidate` | Invalidate cache            | `--key`, `--pattern`                                                 |
+| Command            | Description                                                                   | Key Flags                                                                     |
+| ------------------ | ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `list-customers`   | List customers                                                                | `--limit`, `--page`, `--email`                                                |
+| `get-customer`     | Get customer by ID                                                            | `--id`                                                                        |
+| `list-feedback`    | List survey responses                                                         | `--limit`, `--page`, `--since`, `--until`, `--campaign-id`, `--sort`          |
+| `list-feedback-qa` | Bounded feedback read for exact QA/date reviews with completeness diagnostics | `--since`, `--until`, `--campaign-id`, `--sort`, `--page-size`, `--max-pages` |
+| `get-feedback`     | Get feedback by ID                                                            | `--id`                                                                        |
+| `get-nps-score`    | Current NPS score                                                             | (none)                                                                        |
+| `get-csat-score`   | Current CSAT score                                                            | (none)                                                                        |
+| `get-ces-score`    | Current CES score                                                             | (none)                                                                        |
+| `list-campaigns`   | List survey campaigns                                                         | `--limit`                                                                     |
+| `list-companies`   | List companies with metrics                                                   | `--limit`, `--page`                                                           |
+| `api-status`       | Show rate limit info                                                          | (none)                                                                        |
+| `list-tools`       | List all commands                                                             | (none)                                                                        |
+| `cache-stats`      | Show cache statistics                                                         | (none)                                                                        |
+| `cache-clear`      | Clear all cache                                                               | (none)                                                                        |
+| `cache-invalidate` | Invalidate cache                                                              | `--key`, `--pattern`                                                          |
 
 ### Write Operations (Require Explicit User Command)
 
@@ -98,6 +100,11 @@ npm --prefix "scripts" run cli -- list-feedback --limit 10 --sort desc
 
 ```bash
 npm --prefix "scripts" run cli -- list-feedback --since 2024-01-15 --limit 50
+```
+
+```bash
+npm --prefix "scripts" run cli -- list-feedback-qa \
+  --since 2024-01-15 --until 2024-01-31 --sort desc --page-size 100 --max-pages 20
 ```
 
 ```bash
